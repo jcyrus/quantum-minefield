@@ -15,12 +15,20 @@ export class QuantumGame {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    /**
+     * Apply the Hadamard (interference) tool to a cell in Superposition.
+     */
+    apply_hadamard(x: number, y: number): any;
     contain_cell(x: number, y: number): any;
     get_cell(x: number, y: number): QuantumCell;
     get_grid_snapshot(): any;
     get_probability_cloud(): any;
     get_seed(): bigint;
     is_quantum_inspector_enabled(): boolean;
+    /**
+     * Weak measurement — returns the probability but introduces observer drift.
+     */
+    measure_weak(x: number, y: number): any;
     reveal_cell(x: number, y: number): any;
     set_quantum_inspector(enabled: boolean): void;
 }
@@ -47,12 +55,14 @@ export interface InitOutput {
     readonly quantumcell_state: (a: number) => [number, number];
     readonly quantumcell_x: (a: number) => number;
     readonly quantumcell_y: (a: number) => number;
+    readonly quantumgame_apply_hadamard: (a: number, b: number, c: number) => [number, number, number];
     readonly quantumgame_contain_cell: (a: number, b: number, c: number) => [number, number, number];
     readonly quantumgame_get_cell: (a: number, b: number, c: number) => [number, number, number];
     readonly quantumgame_get_grid_snapshot: (a: number) => [number, number, number];
     readonly quantumgame_get_probability_cloud: (a: number) => [number, number, number];
     readonly quantumgame_get_seed: (a: number) => bigint;
     readonly quantumgame_is_quantum_inspector_enabled: (a: number) => number;
+    readonly quantumgame_measure_weak: (a: number, b: number, c: number) => [number, number, number];
     readonly quantumgame_reveal_cell: (a: number, b: number, c: number) => [number, number, number];
     readonly quantumgame_set_quantum_inspector: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

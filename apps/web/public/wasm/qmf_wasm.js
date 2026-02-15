@@ -92,6 +92,23 @@ export class QuantumGame {
         wasm.__wbg_quantumgame_free(ptr, 0);
     }
     /**
+     * Apply the Hadamard (interference) tool to a cell in Superposition.
+     * @param {number} x
+     * @param {number} y
+     * @returns {any}
+     */
+    apply_hadamard(x, y) {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        _assertNum(x);
+        _assertNum(y);
+        const ret = wasm.quantumgame_apply_hadamard(this.__wbg_ptr, x, y);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @param {number} x
      * @param {number} y
      * @returns {any}
@@ -164,6 +181,23 @@ export class QuantumGame {
         _assertNum(this.__wbg_ptr);
         const ret = wasm.quantumgame_is_quantum_inspector_enabled(this.__wbg_ptr);
         return ret !== 0;
+    }
+    /**
+     * Weak measurement — returns the probability but introduces observer drift.
+     * @param {number} x
+     * @param {number} y
+     * @returns {any}
+     */
+    measure_weak(x, y) {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        _assertNum(x);
+        _assertNum(y);
+        const ret = wasm.quantumgame_measure_weak(this.__wbg_ptr, x, y);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * @param {number} x

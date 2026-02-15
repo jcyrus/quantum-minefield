@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::circuit::Circuit;
-use crate::entanglement::Entanglement;
+use crate::entanglement::{Entanglement, LinkType};
 use crate::rng::SplitMix64;
 
 // ---------------------------------------------------------------------------
@@ -67,6 +67,9 @@ pub enum RevealOutcome {
     GameAlreadyOver,
     /// No containment charges remaining.
     NoChargesRemaining,
+    /// One or more entangled partners were force-collapsed by Bell State
+    /// propagation. The `cells` vector contains their resolved states.
+    EntangledCollapse { cells: Vec<QuantumCell> },
 }
 
 // ---------------------------------------------------------------------------
@@ -119,16 +122,24 @@ impl QuantumGrid {
             .collect::<Vec<_>>();
 
         // Difficulty-scaled entanglement
-        let (step, strength) = match difficulty {
-            "observer" => (11_usize, 0.2),
-            "theorist" => (5, 0.5),
-            _ => (7, 0.35), // "researcher" default
+        let (step, strength, use_bell) = match difficulty {
+            "observer" => (11_usize, 0.2, false),
+            "theorist" => (5, 0.5, true), // BellState pairs at highest difficulty
+            _ => (7, 0.35, false),        // "researcher" default
         };
         let mut entanglement = Entanglement::default();
+        let mut pair_index = 0_usize;
         for left in (0..total).step_by(step) {
             let right = left + (step / 2).max(1);
             if right < total {
-                entanglement.add_pair(left, right, strength);
+                // At "theorist", every other pair is a hard BellState link
+                let link_type = if use_bell && pair_index % 2 == 0 {
+                    LinkType::BellState
+                } else {
+                    LinkType::Probabilistic
+                };
+                entanglement.add_pair(left, right, strength, link_type);
+                pair_index += 1;
             }
         }
 
@@ -215,6 +226,42 @@ impl QuantumGrid {
                 RevealOutcome::Revealed { cell } => RevealOutcome::ContainmentFailed { cell },
                 other => other,
             }
+        }
+    }
+
+    /// **Hadamard Tool** — Apply destructive interference to a Superposition
+    /// cell, flipping its probability (high → low, low → high).
+    ///
+    /// Game Mechanic: lets the player "rewrite" a dangerous cell before clicking.
+    pub fn apply_hadamard(&mut self, x: u32, y: u32) -> Result<f64, &'static str> {
+        let index = self.index_of(x, y).ok_or("coordinates out of bounds")?;
+        match self.cells[index].state {
+            CellState::Superposition { probability } => {
+                let new_p = (1.0 - probability).clamp(0.0, 1.0);
+                self.cells[index].state = CellState::Superposition { probability: new_p };
+                Ok(new_p)
+            }
+            _ => Err("cell is already resolved"),
+        }
+    }
+
+    /// **Observer Effect (Heisenbug)** — Weak measurement. Returns the current
+    /// probability but introduces drift (±4% noise) to the stored state,
+    /// simulating that "looking changes the system."
+    pub fn measure_weak(&mut self, x: u32, y: u32) -> Result<f64, &'static str> {
+        let index = self.index_of(x, y).ok_or("coordinates out of bounds")?;
+        match self.cells[index].state {
+            CellState::Superposition { probability } => {
+                let observed = probability;
+                // Introduce observer drift
+                let drift = self.rng.next_f64() * 0.08 - 0.04;
+                let perturbed = (probability + drift).clamp(0.01, 0.99);
+                self.cells[index].state = CellState::Superposition {
+                    probability: perturbed,
+                };
+                Ok(observed)
+            }
+            _ => Err("cell is already resolved"),
         }
     }
 
@@ -432,17 +479,133 @@ impl QuantumGrid {
         count
     }
 
-    /// Propagate entanglement: after resolving a cell, shift its partner's
-    /// displayed probability.
+    /// Propagate entanglement: after resolving a cell, handle its partners.
+    ///
+    /// - **BellState** links trigger `propagate_collapse` — the partner is
+    ///   force-collapsed (revealed if safe, contained if mine) and the
+    ///   cascade continues recursively through any further Bell partners.
+    /// - **Probabilistic** links just shift the displayed probability.
     fn propagate_entanglement(&mut self, index: usize, was_mine: bool) {
-        if let Some((pair, partner_index)) = self.entanglement.partner_of(index) {
-            if let CellState::Superposition { probability } = self.cells[partner_index].state {
-                let adjusted =
-                    self.entanglement
-                        .collapse_partner_probability(pair, was_mine, probability);
-                self.cells[partner_index].state = CellState::Superposition {
-                    probability: adjusted,
+        // Collect partner info first to avoid borrow issues.
+        let partners: Vec<(usize, LinkType, f64)> = self
+            .entanglement
+            .partners_of(index)
+            .iter()
+            .map(|(pair, partner_idx)| (*partner_idx, pair.link_type, pair.strength))
+            .collect();
+
+        for (partner_index, link_type, _strength) in &partners {
+            if !matches!(
+                self.cells[*partner_index].state,
+                CellState::Superposition { .. }
+            ) {
+                continue;
+            }
+
+            match link_type {
+                LinkType::BellState => {
+                    // Force-collapse the partner and cascade.
+                    let mut visited = std::collections::HashSet::new();
+                    visited.insert(index);
+                    self.propagate_collapse(*partner_index, was_mine, &mut visited);
+                }
+                LinkType::Probabilistic => {
+                    // Legacy Bayesian adjustment.
+                    if let CellState::Superposition { probability } =
+                        self.cells[*partner_index].state
+                    {
+                        // Reconstruct a temporary pair for the calculation
+                        let pair_ref = self
+                            .entanglement
+                            .partners_of(index)
+                            .into_iter()
+                            .find(|(_, pi)| *pi == *partner_index)
+                            .map(|(p, _)| p.clone());
+                        if let Some(pair) = pair_ref {
+                            let adjusted = self.entanglement.collapse_partner_probability(
+                                &pair,
+                                was_mine,
+                                probability,
+                            );
+                            self.cells[*partner_index].state = CellState::Superposition {
+                                probability: adjusted,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recursive (stack-based) Bell State collapse propagation.
+    ///
+    /// When a cell with a BellState partner is observed, the partner is
+    /// instantly force-collapsed to a definite state (anti-correlated).
+    /// If *that* partner also has BellState partners, the cascade continues
+    /// (GHZ-state chain reaction).
+    fn propagate_collapse(
+        &mut self,
+        index: usize,
+        triggering_cell_was_mine: bool,
+        visited: &mut std::collections::HashSet<usize>,
+    ) {
+        // Stack-based iteration to prevent deep recursion stack overflows.
+        let mut stack = vec![(index, triggering_cell_was_mine)];
+
+        while let Some((current, was_mine)) = stack.pop() {
+            if !visited.insert(current) {
+                continue; // already processed — avoid infinite loops
+            }
+
+            if !matches!(self.cells[current].state, CellState::Superposition { .. }) {
+                continue; // already resolved
+            }
+
+            // Anti-correlation: if trigger was a mine, partner is safe; vice versa.
+            let partner_is_mine = !was_mine;
+
+            if self.mine_map[current] && partner_is_mine {
+                // Mine, and Bell collapse says it's a mine → Contain it.
+                self.cells[current].state = CellState::Contained;
+            } else if !self.mine_map[current] && !partner_is_mine {
+                // Safe, and Bell collapse says it's safe → Reveal it.
+                let (cx, cy) = self.coords_of(current);
+                let adj = self.adjacent_mines(cx, cy);
+                self.cells[current].state = CellState::Revealed {
+                    adjacent_mines: adj,
                 };
+                // Note: we intentionally do NOT flood-fill from collapse
+                // to avoid cascading the entire board. Only explicit clicks
+                // trigger flood fill.
+            } else {
+                // Ground truth disagrees with Bell prediction. The physics
+                // is "correct" (anti-correlated) but the mine map is the
+                // source of truth for what the cell actually *is*. Resolve
+                // it according to reality.
+                if self.mine_map[current] {
+                    self.cells[current].state = CellState::Contained;
+                } else {
+                    let (cx, cy) = self.coords_of(current);
+                    let adj = self.adjacent_mines(cx, cy);
+                    self.cells[current].state = CellState::Revealed {
+                        adjacent_mines: adj,
+                    };
+                }
+            }
+
+            // Continue the cascade: find Bell partners of `current`
+            let next_partners: Vec<usize> = self
+                .entanglement
+                .partners_of(current)
+                .iter()
+                .filter(|(pair, _)| pair.link_type == LinkType::BellState)
+                .map(|(_, pi)| *pi)
+                .collect();
+
+            for partner in next_partners {
+                if !visited.contains(&partner) {
+                    stack.push((partner, self.mine_map[current]));
+                }
             }
         }
     }
@@ -661,5 +824,223 @@ mod tests {
         a.reveal_cell(0, 0);
         b.reveal_cell(0, 0);
         assert_eq!(a.mine_map, b.mine_map);
+    }
+
+    // ===================================================================
+    // New: Hard Quantum Mechanics tests
+    // ===================================================================
+
+    #[test]
+    fn bell_state_collapse_forces_partner() {
+        // Directly test the Entanglement module's BellState collapse
+        let mut ent = Entanglement::default();
+        ent.add_pair(0, 1, 1.0, LinkType::BellState);
+
+        let pair = &ent.pairs[0];
+
+        // Observed mine → partner must be safe (0.0)
+        let result = ent.collapse_partner_probability(pair, true, 0.5);
+        assert!(
+            (result - 0.0).abs() < 1e-10,
+            "BellState: mine observed → partner should be 0.0, got {result}"
+        );
+
+        // Observed safe → partner must be mine (1.0)
+        let result = ent.collapse_partner_probability(pair, false, 0.5);
+        assert!(
+            (result - 1.0).abs() < 1e-10,
+            "BellState: safe observed → partner should be 1.0, got {result}"
+        );
+    }
+
+    #[test]
+    fn reveal_cell_auto_resolves_bell_partner() {
+        // Build a small grid with a manually-injected BellState pair.
+        let mut g = QuantumGrid::new(8, 8, 10, 42, "observer");
+        g.reveal_cell(0, 0); // trigger mine placement
+
+        // Find a mine and a safe cell that are both still in Superposition
+        let mine_idx = g
+            .cells
+            .iter()
+            .position(|c| {
+                matches!(c.state, CellState::Superposition { .. })
+                    && g.mine_map[(c.y * g.width + c.x) as usize]
+            })
+            .expect("should find an unresolved mine");
+        let safe_idx = g
+            .cells
+            .iter()
+            .position(|c| {
+                matches!(c.state, CellState::Superposition { .. })
+                    && !g.mine_map[(c.y * g.width + c.x) as usize]
+            })
+            .expect("should find an unresolved safe cell");
+
+        // Inject a BellState pair between them
+        g.entanglement.pairs.clear();
+        g.entanglement
+            .add_pair(safe_idx, mine_idx, 1.0, LinkType::BellState);
+
+        // Reveal the safe cell — this should auto-collapse the mine partner
+        let (sx, sy) = g.coords_of(safe_idx);
+        let outcome = g.reveal_cell(sx, sy);
+        assert!(
+            matches!(outcome, RevealOutcome::Revealed { .. }),
+            "safe cell should be revealed"
+        );
+
+        // The mine partner should now be Contained (force-collapsed)
+        assert!(
+            matches!(g.cells[mine_idx].state, CellState::Contained),
+            "BellState partner mine should be auto-contained, got {:?}",
+            g.cells[mine_idx].state
+        );
+    }
+
+    #[test]
+    fn ghz_chain_propagation() {
+        // Test multi-qubit chain: A → B → C all collapse from revealing A.
+        let mut g = QuantumGrid::new(8, 8, 10, 42, "observer");
+        g.reveal_cell(0, 0); // trigger mine placement
+
+        // Find 3 unresolved cells: one safe, one mine, one safe
+        let cells_in_super: Vec<usize> = g
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.state, CellState::Superposition { .. }))
+            .map(|(i, _)| i)
+            .collect();
+
+        // We need at least 3 cells in superposition
+        assert!(
+            cells_in_super.len() >= 3,
+            "not enough superposition cells for GHZ test"
+        );
+
+        let a = cells_in_super[0];
+        let b = cells_in_super[1];
+        let c = cells_in_super[2];
+
+        // Set up chain: A ↔ B ↔ C  (all BellState)
+        g.entanglement.pairs.clear();
+        g.entanglement.add_pair(a, b, 1.0, LinkType::BellState);
+        g.entanglement.add_pair(b, c, 1.0, LinkType::BellState);
+
+        // All three should be in Superposition
+        assert!(matches!(g.cells[a].state, CellState::Superposition { .. }));
+        assert!(matches!(g.cells[b].state, CellState::Superposition { .. }));
+        assert!(matches!(g.cells[c].state, CellState::Superposition { .. }));
+
+        // Reveal cell A
+        let (ax, ay) = g.coords_of(a);
+        g.reveal_cell(ax, ay);
+
+        // B should now be resolved (no longer Superposition)
+        assert!(
+            !matches!(g.cells[b].state, CellState::Superposition { .. }),
+            "GHZ: B should be force-collapsed after revealing A, got {:?}",
+            g.cells[b].state
+        );
+
+        // C should also be resolved (chain propagation through B)
+        assert!(
+            !matches!(g.cells[c].state, CellState::Superposition { .. }),
+            "GHZ: C should be force-collapsed via chain A→B→C, got {:?}",
+            g.cells[c].state
+        );
+    }
+
+    #[test]
+    fn hadamard_flips_probability() {
+        let mut g = make_grid(8, 8, 10);
+        // Get initial probability of cell (3, 3)
+        let idx = g.index_of(3, 3).unwrap();
+        let original_p = match g.cells[idx].state {
+            CellState::Superposition { probability } => probability,
+            _ => panic!("should be superposition"),
+        };
+
+        let result = g.apply_hadamard(3, 3);
+        assert!(result.is_ok());
+        let new_p = result.unwrap();
+        assert!(
+            (new_p - (1.0 - original_p)).abs() < 1e-10,
+            "Hadamard should flip probability: expected {}, got {new_p}",
+            1.0 - original_p
+        );
+
+        // Verify stored state matches
+        match g.cells[idx].state {
+            CellState::Superposition { probability } => {
+                assert!((probability - new_p).abs() < 1e-10);
+            }
+            _ => panic!("should still be superposition after Hadamard"),
+        }
+
+        // Applying to an already-resolved cell should error
+        g.reveal_cell(0, 0);
+        let idx_0_0 = g.index_of(0, 0).unwrap();
+        if matches!(g.cells[idx_0_0].state, CellState::Revealed { .. }) {
+            let err = g.apply_hadamard(0, 0);
+            assert!(err.is_err());
+        }
+    }
+
+    #[test]
+    fn measure_weak_returns_probability_with_drift() {
+        let mut g = make_grid(8, 8, 10);
+        let idx = g.index_of(3, 3).unwrap();
+        let original_p = match g.cells[idx].state {
+            CellState::Superposition { probability } => probability,
+            _ => panic!("should be superposition"),
+        };
+
+        // Weak measurement should return the original probability
+        let observed = g.measure_weak(3, 3).unwrap();
+        assert!(
+            (observed - original_p).abs() < 1e-10,
+            "measure_weak should return original probability"
+        );
+
+        // But the stored state should have drifted
+        let stored_p = match g.cells[idx].state {
+            CellState::Superposition { probability } => probability,
+            _ => panic!("should still be superposition after weak measurement"),
+        };
+        // Drift is ±4%, so |stored - original| ≤ 0.04 (plus clamp effects)
+        assert!(
+            (stored_p - original_p).abs() <= 0.05,
+            "drift should be small: original={original_p}, stored={stored_p}"
+        );
+        // The stored value should (very likely) differ from the original
+        // due to the random drift. We don't assert inequality because in
+        // very rare cases the drift could be near zero.
+    }
+
+    #[test]
+    fn probabilistic_link_unchanged() {
+        // Regression: Probabilistic links should still do Bayesian adjustment
+        let mut ent = Entanglement::default();
+        ent.add_pair(0, 1, 0.5, LinkType::Probabilistic);
+
+        let pair = &ent.pairs[0];
+
+        // Mine observed, baseline 0.3 → result should blend toward 0.7
+        let result = ent.collapse_partner_probability(pair, true, 0.3);
+        // Expected: 0.3 * 0.5 + 0.7 * 0.5 = 0.5
+        assert!(
+            (result - 0.5).abs() < 1e-10,
+            "Probabilistic: expected 0.5, got {result}"
+        );
+
+        // Safe observed, baseline 0.3 → result should blend toward 0.3
+        let result = ent.collapse_partner_probability(pair, false, 0.3);
+        // Expected: 0.3 * 0.5 + 0.3 * 0.5 = 0.3
+        assert!(
+            (result - 0.3).abs() < 1e-10,
+            "Probabilistic: expected 0.3, got {result}"
+        );
     }
 }

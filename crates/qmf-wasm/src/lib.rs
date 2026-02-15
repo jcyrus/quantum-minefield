@@ -139,6 +139,22 @@ impl QuantumGame {
     pub fn is_quantum_inspector_enabled(&self) -> bool {
         self.quantum_inspector_enabled
     }
+
+    /// Apply the Hadamard (interference) tool to a cell in Superposition.
+    pub fn apply_hadamard(&mut self, x: u32, y: u32) -> Result<JsValue, JsValue> {
+        self.grid
+            .apply_hadamard(x, y)
+            .map(|p| JsValue::from_f64(p))
+            .map_err(|e| JsValue::from_str(e))
+    }
+
+    /// Weak measurement — returns the probability but introduces observer drift.
+    pub fn measure_weak(&mut self, x: u32, y: u32) -> Result<JsValue, JsValue> {
+        self.grid
+            .measure_weak(x, y)
+            .map(|p| JsValue::from_f64(p))
+            .map_err(|e| JsValue::from_str(e))
+    }
 }
 
 fn to_js_value<T>(value: &T) -> Result<JsValue, JsValue>
