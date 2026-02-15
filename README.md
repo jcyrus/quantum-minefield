@@ -4,8 +4,7 @@
 
 Mines exist in **quantum superposition** until observed. Instead of flagging mines, you **purify the wavefunction** by driving system entropy to zero — revealing safe cells and containing mines before detonation.
 
-<!-- TODO: Replace with actual screenshot -->
-<!-- ![Quantum Minefield](docs/screenshot.png) -->
+![Quantum Minefield](docs/screenshot.webp)
 
 ## Features
 
