@@ -1,0 +1,13 @@
+{
+  "name": "quantum-minefield",
+  "private": true,
+  "packageManager": "pnpm@10.6.2",
+  "scripts": {
+    "wasm:build": "./scripts/build-wasm.sh release",
+    "wasm:dev": "./scripts/build-wasm.sh dev",
+    "dev": "pnpm wasm:dev && pnpm --filter @qmf/web dev",
+    "dev:web": "pnpm --filter @qmf/web dev",
+    "build": "pnpm wasm:build && pnpm --filter @qmf/web build",
+    "start": "pnpm --filter @qmf/web start"
+  }
+}

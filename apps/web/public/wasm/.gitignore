@@ -1,0 +1,3 @@
+# Allow wasm build artifacts to be committed (zero-Rust Vercel deploys).
+# wasm-pack regenerates these — commit after each `pnpm wasm:build`.
+package.json

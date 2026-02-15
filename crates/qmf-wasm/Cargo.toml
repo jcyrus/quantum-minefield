@@ -1,0 +1,21 @@
+[package]
+name = "qmf-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+qmf-core = { path = "../qmf-core" }
+wasm-bindgen.workspace = true
+serde-wasm-bindgen.workspace = true
+serde.workspace = true
+js-sys.workspace = true
